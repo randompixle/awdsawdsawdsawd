@@ -11,6 +11,7 @@ using System.Threading;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
 using System.Diagnostics;
+using System.Collections.Generic;
 
 class XPAgent
 {
@@ -49,7 +50,19 @@ class XPAgent
     [DllImport("user32.dll")]
     static extern bool IsWindowVisible(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
     delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
 
     [DllImport("user32.dll")]
     static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
@@ -234,6 +247,9 @@ class XPAgent
         string boundary = "----XPBOUNDARY" + DateTime.Now.Ticks.ToString("x");
         Rectangle bounds = Screen.PrimaryScreen.Bounds;
         string title = GetActiveWindowTitle();
+        List<WindowInfo> wins = GetVisibleWindows(10, bounds);
+        JavaScriptSerializer ser = new JavaScriptSerializer();
+        string winsJson = ser.Serialize(wins);
         byte[] widthField = Encoding.ASCII.GetBytes(
             "--" + boundary + "\r\n" +
             "Content-Disposition: form-data; name=\"width\"\r\n\r\n" +
@@ -248,6 +264,11 @@ class XPAgent
             "--" + boundary + "\r\n" +
             "Content-Disposition: form-data; name=\"active_title\"\r\n\r\n" +
             title + "\r\n"
+        );
+        byte[] winsField = Encoding.ASCII.GetBytes(
+            "--" + boundary + "\r\n" +
+            "Content-Disposition: form-data; name=\"windows_json\"\r\n\r\n" +
+            winsJson + "\r\n"
         );
         byte[] header = Encoding.ASCII.GetBytes(
             "--" + boundary + "\r\n" +
@@ -266,8 +287,10 @@ class XPAgent
             reqStream.Write(widthField, 0, widthField.Length);
             reqStream.Write(heightField, 0, heightField.Length);
             reqStream.Write(titleField, 0, titleField.Length);
+            reqStream.Write(winsField, 0, winsField.Length);
             reqStream.Write(header, 0, header.Length);
             reqStream.Write(png, 0, png.Length);
+            WriteWindowImages(reqStream, boundary, bounds, wins);
             reqStream.Write(footer, 0, footer.Length);
         }
 
@@ -528,6 +551,79 @@ class XPAgent
         {
             SetForegroundWindow(found);
             Thread.Sleep(200);
+        }
+    }
+
+    class WindowInfo
+    {
+        public string title;
+        public int x;
+        public int y;
+        public int w;
+        public int h;
+    }
+
+    static List<WindowInfo> GetVisibleWindows(int max, Rectangle screenBounds)
+    {
+        List<WindowInfo> list = new List<WindowInfo>();
+        EnumWindows(delegate (IntPtr hWnd, IntPtr lParam)
+        {
+            if (!IsWindowVisible(hWnd)) return true;
+            StringBuilder sb = new StringBuilder(256);
+            int len = GetWindowText(hWnd, sb, sb.Capacity);
+            if (len <= 0) return true;
+            RECT r;
+            if (!GetWindowRect(hWnd, out r)) return true;
+            int w = r.Right - r.Left;
+            int h = r.Bottom - r.Top;
+            if (w <= 40 || h <= 40) return true;
+            Rectangle rect = new Rectangle(r.Left, r.Top, w, h);
+            Rectangle intersect = Rectangle.Intersect(screenBounds, rect);
+            if (intersect.Width <= 0 || intersect.Height <= 0) return true;
+            list.Add(new WindowInfo
+            {
+                title = sb.ToString(),
+                x = intersect.X,
+                y = intersect.Y,
+                w = intersect.Width,
+                h = intersect.Height
+            });
+            return list.Count < max;
+        }, IntPtr.Zero);
+        return list;
+    }
+
+    static void WriteWindowImages(Stream reqStream, string boundary, Rectangle screenBounds, List<WindowInfo> wins)
+    {
+        if (wins == null || wins.Count == 0) return;
+        using (Bitmap screen = new Bitmap(screenBounds.Width, screenBounds.Height))
+        {
+            using (Graphics g = Graphics.FromImage(screen))
+            {
+                g.CopyFromScreen(screenBounds.Location, Point.Empty, screenBounds.Size);
+            }
+            for (int i = 0; i < wins.Count; i++)
+            {
+                WindowInfo w = wins[i];
+                Rectangle rect = new Rectangle(w.x, w.y, w.w, w.h);
+                using (Bitmap cropped = screen.Clone(rect, screen.PixelFormat))
+                {
+                    using (MemoryStream ms = new MemoryStream())
+                    {
+                        cropped.Save(ms, ImageFormat.Png);
+                        byte[] png = ms.ToArray();
+                        byte[] header = Encoding.ASCII.GetBytes(
+                            "--" + boundary + "\r\n" +
+                            "Content-Disposition: form-data; name=\"win" + i + "\"; filename=\"win" + i + ".png\"\r\n" +
+                            "Content-Type: image/png\r\n\r\n"
+                        );
+                        byte[] footer = Encoding.ASCII.GetBytes("\r\n");
+                        reqStream.Write(header, 0, header.Length);
+                        reqStream.Write(png, 0, png.Length);
+                        reqStream.Write(footer, 0, footer.Length);
+                    }
+                }
+            }
         }
     }
 }

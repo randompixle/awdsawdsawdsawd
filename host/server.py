@@ -23,11 +23,13 @@ ENABLE_OCR = os.environ.get("ENABLE_OCR", "0") == "1"
 STOP_ON_GOAL = os.environ.get("STOP_ON_GOAL", "0") == "1"
 STOPPED = False
 
-ALLOWED_ACTIONS = {"move", "click", "dblclick", "rclick", "type", "key", "sleep", "noop", "macro", "focus"}
+ALLOWED_ACTIONS = {"move", "click", "dblclick", "rclick", "type", "key", "sleep", "noop", "macro", "focus", "click_window"}
 ACTION_HISTORY = []
 LAST_FRAME_SIZE = None
 LAST_ACTIVE_TITLE = ""
 LAST_OCR_TEXT = ""
+LAST_WINDOWS = []
+LAST_WINDOW_IMAGES = []
 
 
 def _log(msg):
@@ -46,12 +48,26 @@ def _save_frame(file_bytes):
 def _ollama_plan(image_bytes):
     history = "\n".join(ACTION_HISTORY[-MAX_HISTORY:])
     goal = TASK_GOAL if TASK_GOAL else "None"
+    win_lines = []
+    for i, w in enumerate(LAST_WINDOWS):
+        win_lines.append(
+            "[%d] %s @ (%d,%d %dx%d)" % (
+                i,
+                w.get("title", ""),
+                w.get("x", 0),
+                w.get("y", 0),
+                w.get("w", 0),
+                w.get("h", 0),
+            )
+        )
+    win_text = "\n".join(win_lines) if win_lines else "(none)"
     prompt = (
         "You are controlling a Windows XP VM via screen and input. "
         "Goal: %s\n"
         "Recent actions:\n%s\n"
         "Active window title: %s\n"
         "Visible text (OCR): %s\n"
+        "Windows (index, title, rect):\n%s\n"
         "Windows XP tips: Start button is bottom-left. Taskbar is along the bottom. "
         "Start menu opens from Start button. Use Run by Start -> Run when needed. "
         "Desktop icons are usually on the left. "
@@ -70,10 +86,17 @@ def _ollama_plan(image_bytes):
         "type TEXT\n"
         "key ENTER|TAB|ESC|ALT+F4|CTRL+L\n"
         "focus WINDOW_TITLE_SUBSTRING\n"
+        "click_window INDEX\n"
         "sleep MS\n"
         "noop\n"
         "No extra text. If unsure, output 'noop'."
-    ) % (goal, history if history else "(none)", LAST_ACTIVE_TITLE or "(unknown)", LAST_OCR_TEXT or "(none)")
+    ) % (
+        goal,
+        history if history else "(none)",
+        LAST_ACTIVE_TITLE or "(unknown)",
+        LAST_OCR_TEXT or "(none)",
+        win_text,
+    )
 
     payload = {
         "model": OLLAMA_MODEL,
@@ -81,7 +104,10 @@ def _ollama_plan(image_bytes):
         "stream": False,
     }
     if USE_VISION:
-        payload["images"] = [base64.b64encode(image_bytes).decode("ascii")]
+        images = [base64.b64encode(image_bytes).decode("ascii")]
+        for img in LAST_WINDOW_IMAGES:
+            images.append(base64.b64encode(img).decode("ascii"))
+        payload["images"] = images
 
     req = Request(
         OLLAMA_URL.rstrip("/") + "/api/generate",
@@ -138,6 +164,8 @@ def _parse_actions(text):
         if cmd == "macro":
             macro_name = line[len("macro"):].strip()
             actions.extend(_expand_macro(macro_name))
+        elif cmd == "click_window":
+            actions.append(line)
         else:
             if cmd == "type":
                 text = line[len("type"):].strip()
@@ -223,6 +251,22 @@ def _actions_to_json(actions):
             item["key"] = arg.strip()
         elif cmd == "focus":
             item["text"] = arg.strip()
+        elif cmd == "click_window":
+            try:
+                idx = int(arg.strip())
+            except ValueError:
+                continue
+            if idx < 0 or idx >= len(LAST_WINDOWS):
+                continue
+            w = LAST_WINDOWS[idx]
+            cx = int(w.get("x", 0) + w.get("w", 0) / 2)
+            cy = int(w.get("y", 0) + w.get("h", 0) / 2)
+            item["cmd"] = "move"
+            item["x"] = cx
+            item["y"] = cy
+            items.append(item)
+            items.append({"cmd": "click", "button": "left"})
+            continue
         elif cmd == "sleep":
             try:
                 item["ms"] = int(arg.strip())
@@ -297,6 +341,8 @@ class Handler(BaseHTTPRequestHandler):
         global LAST_FRAME_SIZE
         global LAST_ACTIVE_TITLE
         global LAST_OCR_TEXT
+        global LAST_WINDOWS
+        global LAST_WINDOW_IMAGES
         if "width" in fields and "height" in fields:
             try:
                 w = int(fields["width"][0])
@@ -310,9 +356,22 @@ class Handler(BaseHTTPRequestHandler):
                 LAST_ACTIVE_TITLE = fields["active_title"][0]
             except Exception:
                 LAST_ACTIVE_TITLE = ""
+        if "windows_json" in fields:
+            try:
+                LAST_WINDOWS = json.loads(fields["windows_json"][0])
+            except Exception:
+                LAST_WINDOWS = []
 
         image_bytes = fields["frame"][0]
         _save_frame(image_bytes)
+        LAST_WINDOW_IMAGES = []
+        for i in range(10):
+            key = "win%d" % i
+            if key in fields:
+                try:
+                    LAST_WINDOW_IMAGES.append(fields[key][0])
+                except Exception:
+                    pass
         if ENABLE_OCR:
             LAST_OCR_TEXT = _maybe_ocr(image_bytes)
 

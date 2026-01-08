@@ -20,6 +20,7 @@ Host responds with JSON:
   {"cmd":"type","text":"hello"},
   {"cmd":"key","key":"ENTER"},
   {"cmd":"focus","text":"notepad"},
+  {"cmd":"click_window","index":0},
   {"cmd":"sleep","ms":300}
 ]}
 ```
@@ -67,6 +68,8 @@ Keys:
 - Supported `key` values include `ENTER`, `TAB`, `ESC`, `ALT+F4`, `CTRL+L`, `WIN+R`.
 Focus:
 - Use `focus <substring>` to bring a window to the foreground by title substring.
+Window targeting:
+- Model may use `click_window INDEX` to click the center of a visible window (from the last frame).
 
 ## Command socket (XP agent)
 The agent also listens for plain-text commands on `XP_CMD_PORT` (default 6001).
