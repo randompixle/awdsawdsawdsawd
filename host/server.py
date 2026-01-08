@@ -4,7 +4,9 @@ import cgi
 import io
 import json
 import os
+import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import Request, urlopen
 
@@ -17,11 +19,15 @@ ENABLE_ACTIONS = os.environ.get("ENABLE_ACTIONS", "0") == "1"
 USE_VISION = os.environ.get("USE_VISION", "1") == "1"
 TASK_GOAL = os.environ.get("TASK_GOAL", "").strip()
 MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "6"))
+ENABLE_OCR = os.environ.get("ENABLE_OCR", "0") == "1"
+STOP_ON_GOAL = os.environ.get("STOP_ON_GOAL", "0") == "1"
+STOPPED = False
 
 ALLOWED_ACTIONS = {"move", "click", "dblclick", "rclick", "type", "key", "sleep", "noop", "macro", "focus"}
 ACTION_HISTORY = []
 LAST_FRAME_SIZE = None
 LAST_ACTIVE_TITLE = ""
+LAST_OCR_TEXT = ""
 
 
 def _log(msg):
@@ -45,12 +51,14 @@ def _ollama_plan(image_bytes):
         "Goal: %s\n"
         "Recent actions:\n%s\n"
         "Active window title: %s\n"
+        "Visible text (OCR): %s\n"
         "Windows XP tips: Start button is bottom-left. Taskbar is along the bottom. "
         "Start menu opens from Start button. Use Run by Start -> Run when needed. "
         "Desktop icons are usually on the left. "
         "Use the current screen to decide the next small step toward the goal. "
         "Avoid right-click unless explicitly needed. "
         "Always move the mouse before any click. "
+        "move X Y sets the cursor to absolute screen coordinates (not relative). "
         "Use integer pixel coordinates for move within the screen bounds. "
         "Prefer macro open_run, then type the app name and press ENTER. "
         "You may also use macro: macro open_run. "
@@ -65,7 +73,7 @@ def _ollama_plan(image_bytes):
         "sleep MS\n"
         "noop\n"
         "No extra text. If unsure, output 'noop'."
-    ) % (goal, history if history else "(none)", LAST_ACTIVE_TITLE or "(unknown)")
+    ) % (goal, history if history else "(none)", LAST_ACTIVE_TITLE or "(unknown)", LAST_OCR_TEXT or "(none)")
 
     payload = {
         "model": OLLAMA_MODEL,
@@ -100,6 +108,16 @@ def _expand_macro(name):
     if macro == "open_run":
         actions.extend([
             "key WIN+R",
+            "sleep 300",
+        ])
+    elif macro.startswith("save_as"):
+        parts = macro.split(" ", 1)
+        filename = parts[1] if len(parts) > 1 else "note.txt"
+        actions.extend([
+            "key CTRL+S",
+            "sleep 300",
+            "type " + filename,
+            "key ENTER",
             "sleep 300",
         ])
     return actions
@@ -155,6 +173,24 @@ def _parse_actions(text):
     return actions
 
 
+def _maybe_ocr(image_bytes):
+    if not ENABLE_OCR:
+        return ""
+    try:
+        proc = subprocess.run(
+            ["tesseract", "-", "stdout", "-l", "eng"],
+            input=image_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+        )
+        text = proc.stdout.decode("utf-8", errors="replace")
+        text = " ".join(text.split())
+        return text[:500]
+    except Exception:
+        return ""
+
+
 def _actions_to_json(actions):
     items = []
     for line in actions:
@@ -197,6 +233,45 @@ def _actions_to_json(actions):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/last.png":
+            try:
+                with open(os.path.join(DATA_DIR, "last.png"), "rb") as f:
+                    body = f.read()
+            except Exception:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if self.path == "/stream":
+            self.send_response(200)
+            boundary = "frame"
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=%s" % boundary)
+            self.end_headers()
+            while True:
+                try:
+                    with open(os.path.join(DATA_DIR, "last.png"), "rb") as f:
+                        frame = f.read()
+                    self.wfile.write(("--%s\r\n" % boundary).encode("ascii"))
+                    self.wfile.write(b"Content-Type: image/png\r\n")
+                    self.wfile.write(("Content-Length: %d\r\n\r\n" % len(frame)).encode("ascii"))
+                    self.wfile.write(frame)
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
+                    time.sleep(0.2)
+                except Exception:
+                    break
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
     def do_POST(self):
         if self.path != "/frame":
             self.send_response(404)
@@ -221,6 +296,7 @@ class Handler(BaseHTTPRequestHandler):
 
         global LAST_FRAME_SIZE
         global LAST_ACTIVE_TITLE
+        global LAST_OCR_TEXT
         if "width" in fields and "height" in fields:
             try:
                 w = int(fields["width"][0])
@@ -237,8 +313,11 @@ class Handler(BaseHTTPRequestHandler):
 
         image_bytes = fields["frame"][0]
         _save_frame(image_bytes)
+        if ENABLE_OCR:
+            LAST_OCR_TEXT = _maybe_ocr(image_bytes)
 
-        if not ENABLE_ACTIONS:
+        global STOPPED
+        if STOPPED or not ENABLE_ACTIONS:
             actions = ["noop"]
         else:
             try:
@@ -247,9 +326,13 @@ class Handler(BaseHTTPRequestHandler):
                 _log("LLM error: %s" % exc)
                 llm_text = "noop"
             actions = _parse_actions(llm_text)
+            _log("Actions: " + " | ".join(actions))
             ACTION_HISTORY.extend(actions)
             if len(ACTION_HISTORY) > MAX_HISTORY * 2:
                 del ACTION_HISTORY[: len(ACTION_HISTORY) - MAX_HISTORY * 2]
+            if STOP_ON_GOAL and "stop" in TASK_GOAL.lower():
+                if any(a.startswith("key CTRL+S") or a.startswith("macro save_as") for a in actions):
+                    STOPPED = True
 
         body = json.dumps(_actions_to_json(actions)).encode("utf-8")
         self.send_response(200)

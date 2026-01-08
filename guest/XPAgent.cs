@@ -10,6 +10,7 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
+using System.Diagnostics;
 
 class XPAgent
 {
@@ -72,6 +73,7 @@ class XPAgent
     static int IntervalMs = int.Parse(Environment.GetEnvironmentVariable("XP_INTERVAL_MS") ?? "1000");
     static int CmdPort = int.Parse(Environment.GetEnvironmentVariable("XP_CMD_PORT") ?? "6001");
     static volatile bool Paused = false;
+    static string DropDir = Environment.GetEnvironmentVariable("XP_DROP_DIR") ?? @"C:\Temp";
 
     [STAThread]
     static void Main()
@@ -117,12 +119,53 @@ class XPAgent
                     using (TcpClient client = listener.AcceptTcpClient())
                     using (NetworkStream stream = client.GetStream())
                     using (StreamReader reader = new StreamReader(stream))
+                    using (StreamWriter writer = new StreamWriter(stream))
                     {
+                        writer.AutoFlush = true;
+                        FileStream fileOut = null;
+                        string filePath = null;
                         string line;
                         while ((line = reader.ReadLine()) != null)
                         {
                             if (line.Length == 0) continue;
-                            ExecuteActionsText(line);
+                            if (line.StartsWith("clipboard ", StringComparison.OrdinalIgnoreCase))
+                            {
+                                string text = line.Substring("clipboard ".Length);
+                                SetClipboardText(text);
+                                writer.WriteLine("OK");
+                            }
+                            else if (line.StartsWith("cmd ", StringComparison.OrdinalIgnoreCase))
+                            {
+                                string cmdText = line.Substring("cmd ".Length);
+                                string output = RunCmd(cmdText);
+                                writer.WriteLine(output.Replace("\r", "").Replace("\n", "\\n"));
+                            }
+                            else if (line.StartsWith("file_begin ", StringComparison.OrdinalIgnoreCase))
+                            {
+                                string name = line.Substring("file_begin ".Length).Trim();
+                                if (!Directory.Exists(DropDir)) Directory.CreateDirectory(DropDir);
+                                filePath = Path.Combine(DropDir, name);
+                                fileOut = new FileStream(filePath, FileMode.Create, FileAccess.Write);
+                                writer.WriteLine("OK");
+                            }
+                            else if (line.StartsWith("file_chunk ", StringComparison.OrdinalIgnoreCase) && fileOut != null)
+                            {
+                                string b64 = line.Substring("file_chunk ".Length).Trim();
+                                byte[] data = Convert.FromBase64String(b64);
+                                fileOut.Write(data, 0, data.Length);
+                            }
+                            else if (line.StartsWith("file_end", StringComparison.OrdinalIgnoreCase) && fileOut != null)
+                            {
+                                fileOut.Flush();
+                                fileOut.Close();
+                                fileOut = null;
+                                writer.WriteLine("SAVED " + filePath);
+                            }
+                            else
+                            {
+                                ExecuteActionsText(line);
+                                writer.WriteLine("OK");
+                            }
                         }
                     }
                 }
@@ -414,6 +457,42 @@ class XPAgent
     static void KeyUp(byte vk)
     {
         keybd_event(vk, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+    }
+
+    static void SetClipboardText(string text)
+    {
+        try
+        {
+            Thread t = new Thread(() => Clipboard.SetText(text ?? ""));
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            t.Join();
+        }
+        catch
+        {
+            // Ignore clipboard errors.
+        }
+    }
+
+    static string RunCmd(string cmd)
+    {
+        try
+        {
+            ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/c " + cmd);
+            psi.UseShellExecute = false;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.CreateNoWindow = true;
+            Process p = Process.Start(psi);
+            string output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+            p.WaitForExit();
+            if (output.Length > 4000) output = output.Substring(0, 4000);
+            return output.Trim();
+        }
+        catch (Exception ex)
+        {
+            return "ERR " + ex.Message;
+        }
     }
 
     static string GetActiveWindowTitle()
