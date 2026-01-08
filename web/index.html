@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>XP Guest Agent Download</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #f3f3f3; color: #222; }
+    .card { max-width: 720px; padding: 20px; background: #fff; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
+    code { background: #eee; padding: 2px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>XP Guest Agent</h1>
+    <p>Download the guest agent source and build it inside Windows XP.</p>
+    <p><a href="guest.zip">Download guest.zip</a></p>
+    <h2>Build in XP</h2>
+    <pre><code>csc /target:exe /out:XPAgent.exe /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll XPAgent.cs</code></pre>
+    <h2>Run</h2>
+    <pre><code>set XP_HOST=192.168.232.1
+set XP_PORT=5000
+set XP_INTERVAL_MS=1000
+XPAgent.exe</code></pre>
+  </div>
+</body>
+</html>
