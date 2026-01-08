@@ -18,9 +18,10 @@ USE_VISION = os.environ.get("USE_VISION", "1") == "1"
 TASK_GOAL = os.environ.get("TASK_GOAL", "").strip()
 MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "6"))
 
-ALLOWED_ACTIONS = {"move", "click", "dblclick", "rclick", "type", "key", "sleep", "noop", "macro"}
+ALLOWED_ACTIONS = {"move", "click", "dblclick", "rclick", "type", "key", "sleep", "noop", "macro", "focus"}
 ACTION_HISTORY = []
 LAST_FRAME_SIZE = None
+LAST_ACTIVE_TITLE = ""
 
 
 def _log(msg):
@@ -43,6 +44,7 @@ def _ollama_plan(image_bytes):
         "You are controlling a Windows XP VM via screen and input. "
         "Goal: %s\n"
         "Recent actions:\n%s\n"
+        "Active window title: %s\n"
         "Windows XP tips: Start button is bottom-left. Taskbar is along the bottom. "
         "Start menu opens from Start button. Use Run by Start -> Run when needed. "
         "Desktop icons are usually on the left. "
@@ -50,6 +52,7 @@ def _ollama_plan(image_bytes):
         "Avoid right-click unless explicitly needed. "
         "Always move the mouse before any click. "
         "Use integer pixel coordinates for move within the screen bounds. "
+        "Prefer macro open_run, then type the app name and press ENTER. "
         "You may also use macro: macro open_run. "
         "Return only action lines, one per line, in this format:\n"
         "move X Y\n"
@@ -58,10 +61,11 @@ def _ollama_plan(image_bytes):
         "rclick\n"
         "type TEXT\n"
         "key ENTER|TAB|ESC|ALT+F4|CTRL+L\n"
+        "focus WINDOW_TITLE_SUBSTRING\n"
         "sleep MS\n"
         "noop\n"
         "No extra text. If unsure, output 'noop'."
-    ) % (goal, history if history else "(none)")
+    ) % (goal, history if history else "(none)", LAST_ACTIVE_TITLE or "(unknown)")
 
     payload = {
         "model": OLLAMA_MODEL,
@@ -117,9 +121,28 @@ def _parse_actions(text):
             macro_name = line[len("macro"):].strip()
             actions.extend(_expand_macro(macro_name))
         else:
-            actions.append(line)
+            if cmd == "type":
+                text = line[len("type"):].strip()
+                if text.startswith("\"") and text.endswith("\"") and len(text) >= 2:
+                    text = text[1:-1]
+                if text.startswith("'") and text.endswith("'") and len(text) >= 2:
+                    text = text[1:-1]
+                actions.append("type " + text)
+            else:
+                actions.append(line)
     if not actions:
         actions = ["noop"]
+    # Ensure Run is used for app launch goals.
+    if TASK_GOAL.lower().startswith("open ") and not any(
+        a.startswith(("macro open_run", "key WIN+R")) for a in actions
+    ):
+        actions = _expand_macro("open_run") + actions
+    # If goal includes typing, click center after launch to focus the app window.
+    if "type" in TASK_GOAL.lower() and LAST_FRAME_SIZE:
+        cx = LAST_FRAME_SIZE[0] // 2
+        cy = LAST_FRAME_SIZE[1] // 2
+        if not any(a.startswith(("move ", "click")) for a in actions):
+            actions.extend(["move %d %d" % (cx, cy), "click left", "sleep 200"])
     # Require a move before any click to avoid random corner clicks.
     has_move = any(a.startswith("move ") for a in actions)
     if not has_move:
@@ -162,6 +185,8 @@ def _actions_to_json(actions):
             item["text"] = arg
         elif cmd == "key":
             item["key"] = arg.strip()
+        elif cmd == "focus":
+            item["text"] = arg.strip()
         elif cmd == "sleep":
             try:
                 item["ms"] = int(arg.strip())
@@ -195,6 +220,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         global LAST_FRAME_SIZE
+        global LAST_ACTIVE_TITLE
         if "width" in fields and "height" in fields:
             try:
                 w = int(fields["width"][0])
@@ -203,6 +229,11 @@ class Handler(BaseHTTPRequestHandler):
                     LAST_FRAME_SIZE = (w, h)
             except ValueError:
                 LAST_FRAME_SIZE = None
+        if "active_title" in fields:
+            try:
+                LAST_ACTIVE_TITLE = fields["active_title"][0]
+            except Exception:
+                LAST_ACTIVE_TITLE = ""
 
         image_bytes = fields["frame"][0]
         _save_frame(image_bytes)

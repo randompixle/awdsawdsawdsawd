@@ -34,6 +34,23 @@ class XPAgent
     static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
     [DllImport("user32.dll")]
+    static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+
+    [DllImport("user32.dll")]
+    static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    static extern bool IsWindowVisible(IntPtr hWnd);
+
+    delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
     static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
 
     [DllImport("user32.dll")]
@@ -173,6 +190,7 @@ class XPAgent
         string url = "http://" + Host + ":" + Port + "/frame";
         string boundary = "----XPBOUNDARY" + DateTime.Now.Ticks.ToString("x");
         Rectangle bounds = Screen.PrimaryScreen.Bounds;
+        string title = GetActiveWindowTitle();
         byte[] widthField = Encoding.ASCII.GetBytes(
             "--" + boundary + "\r\n" +
             "Content-Disposition: form-data; name=\"width\"\r\n\r\n" +
@@ -182,6 +200,11 @@ class XPAgent
             "--" + boundary + "\r\n" +
             "Content-Disposition: form-data; name=\"height\"\r\n\r\n" +
             bounds.Height.ToString() + "\r\n"
+        );
+        byte[] titleField = Encoding.ASCII.GetBytes(
+            "--" + boundary + "\r\n" +
+            "Content-Disposition: form-data; name=\"active_title\"\r\n\r\n" +
+            title + "\r\n"
         );
         byte[] header = Encoding.ASCII.GetBytes(
             "--" + boundary + "\r\n" +
@@ -199,6 +222,7 @@ class XPAgent
         {
             reqStream.Write(widthField, 0, widthField.Length);
             reqStream.Write(heightField, 0, heightField.Length);
+            reqStream.Write(titleField, 0, titleField.Length);
             reqStream.Write(header, 0, header.Length);
             reqStream.Write(png, 0, png.Length);
             reqStream.Write(footer, 0, footer.Length);
@@ -279,6 +303,9 @@ class XPAgent
             case "sleep":
                 if (item.ms > 0) Thread.Sleep(item.ms);
                 break;
+            case "focus":
+                if (!string.IsNullOrEmpty(item.text)) FocusWindowByTitle(item.text);
+                break;
             case "noop":
             default:
                 break;
@@ -340,6 +367,9 @@ class XPAgent
                         if (int.TryParse(arg, out ms)) Thread.Sleep(ms);
                         break;
                     }
+                case "focus":
+                    if (arg.Length > 0) FocusWindowByTitle(arg);
+                    break;
                 case "noop":
                 default:
                     break;
@@ -384,5 +414,41 @@ class XPAgent
     static void KeyUp(byte vk)
     {
         keybd_event(vk, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+    }
+
+    static string GetActiveWindowTitle()
+    {
+        IntPtr hwnd = GetForegroundWindow();
+        if (hwnd == IntPtr.Zero) return "";
+        StringBuilder sb = new StringBuilder(256);
+        int len = GetWindowText(hwnd, sb, sb.Capacity);
+        if (len <= 0) return "";
+        return sb.ToString();
+    }
+
+    static void FocusWindowByTitle(string needle)
+    {
+        string target = needle.ToLower();
+        IntPtr found = IntPtr.Zero;
+        EnumWindows(delegate (IntPtr hWnd, IntPtr lParam)
+        {
+            if (!IsWindowVisible(hWnd)) return true;
+            StringBuilder sb = new StringBuilder(256);
+            int len = GetWindowText(hWnd, sb, sb.Capacity);
+            if (len <= 0) return true;
+            string title = sb.ToString();
+            if (title.ToLower().Contains(target))
+            {
+                found = hWnd;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+
+        if (found != IntPtr.Zero)
+        {
+            SetForegroundWindow(found);
+            Thread.Sleep(200);
+        }
     }
 }

@@ -18,6 +18,7 @@ Host responds with JSON:
   {"cmd":"click","button":"left"},
   {"cmd":"type","text":"hello"},
   {"cmd":"key","key":"ENTER"},
+  {"cmd":"focus","text":"notepad"},
   {"cmd":"sleep","ms":300}
 ]}
 ```
@@ -60,6 +61,8 @@ Hotkey:
 - Press `F12` to toggle pause/resume.
 Keys:
 - Supported `key` values include `ENTER`, `TAB`, `ESC`, `ALT+F4`, `CTRL+L`, `WIN+R`.
+Focus:
+- Use `focus <substring>` to bring a window to the foreground by title substring.
 
 ## Command socket (XP agent)
 The agent also listens for plain-text commands on `XP_CMD_PORT` (default 6001).
